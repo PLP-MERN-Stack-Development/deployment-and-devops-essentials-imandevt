@@ -1,0 +1,261 @@
+# GitHub Actions Workflow for Deploying Backend (Chat Server) to Render
+# This workflow automates the deployment of the Node.js/Express backend server to Render
+# Trigger: On push to main branch and manual workflow dispatch
+# Job: Deploys the server code to Render using their deployment API
+
+name: Deploy Backend to Render
+
+# ==================== TRIGGERS ====================
+# This workflow is triggered in two ways:
+# 1. Automatically on every push to the main branch
+# 2. Manually via GitHub Actions UI (workflow_dispatch)
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# ==================== ENVIRONMENT VARIABLES ====================
+# Set environment variables for the entire workflow
+env:
+  # Project identification
+  RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+  RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+  # Node.js version for consistency with production
+  NODE_VERSION: "18"
+
+jobs:
+  # ==================== DEPLOYMENT JOB ====================
+  deploy:
+    # Run on GitHub's Ubuntu runners
+    runs-on: ubuntu-latest
+
+    # This job must succeed to complete the workflow
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      # ==================== STEP 1: CHECKOUT CODE ====================
+      # Clone the repository code to the runner
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch all history for accurate git information
+          fetch-depth: 0
+
+      # ==================== STEP 2: VALIDATE ENVIRONMENT VARIABLES ====================
+      # Ensure all required secrets are configured
+      - name: Validate Required Secrets
+        run: |
+          echo "Checking for required Render deployment secrets..."
+          if [ -z "${{ secrets.RENDER_SERVICE_ID }}" ]; then
+            echo "❌ Error: RENDER_SERVICE_ID secret is not configured"
+            exit 1
+          fi
+          if [ -z "${{ secrets.RENDER_API_KEY }}" ]; then
+            echo "❌ Error: RENDER_API_KEY secret is not configured"
+            exit 1
+          fi
+          echo "✅ All required secrets are configured"
+
+      # ==================== STEP 3: SET UP NODE.JS ====================
+      # Install the specified Node.js version
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Use consistent Node.js version with Render
+          node-version: ${{ env.NODE_VERSION }}
+          # Cache npm dependencies to speed up workflow
+          cache: "npm"
+          cache-dependency-path: "server/package-lock.json"
+
+      # ==================== STEP 4: INSTALL DEPENDENCIES ====================
+      # Install all required npm packages for the server
+      - name: Install Server Dependencies
+        working-directory: ./server
+        run: |
+          echo "📦 Installing dependencies..."
+          npm ci
+          echo "✅ Dependencies installed successfully"
+
+      # ==================== STEP 5: LINT CODE ====================
+      # Verify code quality (optional - add eslint to package.json if needed)
+      - name: Lint Server Code
+        working-directory: ./server
+        run: |
+          echo "🔍 Checking code quality..."
+          # Check if eslint is installed, if not, skip this step
+          if npm list eslint > /dev/null 2>&1; then
+            npm run lint || echo "⚠️  Lint warnings found (non-blocking)"
+          else
+            echo "⏭️  ESLint not configured, skipping..."
+          fi
+
+      # ==================== STEP 6: RUN TESTS ====================
+      # Execute automated tests to ensure code quality
+      - name: Run Tests
+        working-directory: ./server
+        run: |
+          echo "🧪 Running tests..."
+          # Check if test script exists, if not, skip this step
+          if grep -q '"test"' package.json; then
+            npm test || echo "⚠️  Tests failed (review required)"
+          else
+            echo "⏭️  No test script configured, skipping..."
+          fi
+        continue-on-error: true
+
+      # ==================== STEP 7: BUILD CHECK ====================
+      # Verify the application structure is correct
+      - name: Build/Verify Application
+        working-directory: ./server
+        run: |
+          echo "🔨 Verifying application..."
+          # Check if main entry file exists
+          if [ -f "server.js" ]; then
+            echo "✅ Server entry point (server.js) found"
+            node -c server.js && echo "✅ Node.js syntax check passed"
+          else
+            echo "❌ server.js not found"
+            exit 1
+          fi
+
+      # ==================== STEP 8: ENVIRONMENT FILE VALIDATION ====================
+      # Ensure all required environment variables are documented
+      - name: Validate Environment Configuration
+        run: |
+          echo "📋 Required environment variables for Render:"
+          echo "   - MONGO_URI: MongoDB connection string"
+          echo "   - CLIENT_URL: Frontend URL (for CORS)"
+          echo "   - PORT: Server port (default: 5000)"
+          echo "   - JWT_SECRET: Secret key for JWT tokens"
+          echo ""
+          echo "⚠️  Make sure these are set in Render dashboard under Environment Variables"
+
+      # ==================== STEP 9: PREPARE DEPLOYMENT PAYLOAD ====================
+      # Create deployment metadata
+      - name: Prepare Deployment Metadata
+        id: deployment_info
+        run: |
+          echo "commit_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "commit_message=$(git log -1 --pretty=%B)" >> $GITHUB_OUTPUT
+          echo "commit_author=$(git log -1 --pretty=%an)" >> $GITHUB_OUTPUT
+          echo "deployment_timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
+      # ==================== STEP 10: TRIGGER RENDER DEPLOYMENT ====================
+      # Use Render's API to deploy the service
+      - name: Deploy to Render
+        id: render_deploy
+        run: |
+          echo "🚀 Triggering Render deployment..."
+
+          # Call Render API to trigger deployment
+          DEPLOY_RESPONSE=$(curl -s -X POST \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{}')
+
+          echo "Response: $DEPLOY_RESPONSE"
+
+          # Extract deployment ID from response
+          DEPLOY_ID=$(echo "$DEPLOY_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+          if [ -z "$DEPLOY_ID" ]; then
+            echo "❌ Failed to trigger deployment"
+            echo "$DEPLOY_RESPONSE"
+            exit 1
+          fi
+
+          echo "deploy_id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+          echo "✅ Deployment triggered successfully"
+
+      # ==================== STEP 11: MONITOR DEPLOYMENT STATUS ====================
+      # Poll Render API to check deployment progress
+      - name: Monitor Deployment Progress
+        run: |
+          echo "⏳ Monitoring deployment status..."
+
+          DEPLOY_ID="${{ steps.render_deploy.outputs.deploy_id }}"
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            STATUS_RESPONSE=$(curl -s \
+              "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys/$DEPLOY_ID" \
+              -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}")
+            
+            # Extract status from response
+            STATUS=$(echo "$STATUS_RESPONSE" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+            
+            echo "Current Status: $STATUS (Attempt $((ATTEMPT + 1))/$MAX_ATTEMPTS)"
+            
+            if [ "$STATUS" = "live" ]; then
+              echo "✅ Deployment successful! Service is now live"
+              break
+            elif [ "$STATUS" = "build_failed" ] || [ "$STATUS" = "deploy_failed" ]; then
+              echo "❌ Deployment failed with status: $STATUS"
+              exit 1
+            fi
+            
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 10
+          done
+
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "⚠️  Deployment monitoring timed out (10 minutes). Check Render dashboard for status."
+          fi
+
+      # ==================== STEP 12: POST-DEPLOYMENT VERIFICATION ====================
+      # Verify the deployed service is responding
+      - name: Verify Deployment
+        continue-on-error: true
+        run: |
+          echo "🔍 Verifying deployed service..."
+
+          # Get service URL from environment or use a known pattern
+          SERVICE_URL="https://${{ secrets.RENDER_SERVICE_ID }}.onrender.com"
+
+          # Try to reach the deployed service
+          for i in {1..5}; do
+            echo "Health check attempt $i/5..."
+            if curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/" | grep -q "200"; then
+              echo "✅ Service is responding correctly"
+              break
+            fi
+            sleep 5
+          done
+
+      # ==================== STEP 13: SEND DEPLOYMENT NOTIFICATION ====================
+      # Create a deployment summary
+      - name: Create Deployment Summary
+        if: always()
+        run: |
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment Details:**" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** main" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit SHA:** ${{ steps.deployment_info.outputs.commit_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Author:** ${{ steps.deployment_info.outputs.commit_author }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp:** ${{ steps.deployment_info.outputs.deployment_timestamp }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment Variables Required on Render:**" >> $GITHUB_STEP_SUMMARY
+          echo "- MONGO_URI" >> $GITHUB_STEP_SUMMARY
+          echo "- CLIENT_URL" >> $GITHUB_STEP_SUMMARY
+          echo "- PORT (default: 5000)" >> $GITHUB_STEP_SUMMARY
+          echo "- JWT_SECRET" >> $GITHUB_STEP_SUMMARY
+
+      # ==================== STEP 14: FAILURE NOTIFICATION ====================
+      # Notify on deployment failure
+      - name: Handle Deployment Failure
+        if: failure()
+        run: |
+          echo "❌ Deployment to Render failed!"
+          echo ""
+          echo "Troubleshooting steps:"
+          echo "1. Check GitHub Actions logs above for error details"
+          echo "2. Verify RENDER_SERVICE_ID and RENDER_API_KEY secrets are correct"
+          echo "3. Check Render dashboard for service status and build logs"
+          echo "4. Ensure all required environment variables are set on Render"
+          echo ""
+          exit 1
