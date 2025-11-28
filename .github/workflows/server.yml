@@ -70,7 +70,7 @@ jobs:
 
       # ==================== STEP 4: INSTALL DEPENDENCIES ====================
       # Install all required npm packages for the server
-      - name: Install Server Dependencies
+      - name: Installation of Server Dependencies
         working-directory: ./server
         run: |
           echo "📦 Installing dependencies..."
