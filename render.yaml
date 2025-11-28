@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: chat-server
+    env: node
+    plan: free
+    path: server
+    buildCommand: "npm ci"
+    startCommand: "npm start"
+    autoDeploy: true
+    envVars:
+      - key: MONGO_URI
+        from: env
+      - key: JWT_SECRET
+        from: env
+      - key: CLIENT_URL
+        from: env
