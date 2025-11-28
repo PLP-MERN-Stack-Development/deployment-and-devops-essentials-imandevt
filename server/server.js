@@ -210,6 +210,17 @@ app.get('/', (req, res) => res.send('Socket.io Chat Server Running'));
 
 // Start
 const PORT = process.env.PORT || 5000;
+
+// Graceful handling for common listen errors (e.g., port in use)
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Use a different PORT or stop the process using it.`);
+    process.exit(1);
+  } else {
+    console.error('Server error:', err);
+  }
+});
+
 server.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
 module.exports = { app, server, io };
