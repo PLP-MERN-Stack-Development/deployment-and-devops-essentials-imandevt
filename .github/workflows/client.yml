@@ -1,0 +1,61 @@
+name: Frontend — Build and Deploy to Vercel
+
+# Trigger on push to main when client files change, and allow manual dispatch
+on:
+  push:
+    branches: [main]
+    paths:
+      - "client/**"
+      - ".github/workflows/client.yml"
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: "18"
+
+jobs:
+  build-and-deploy:
+    name: Build client and deploy to Vercel
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: "client/package-lock.json"
+
+      - name: Install client dependencies
+        working-directory: ./client
+        run: |
+          npm ci
+
+      - name: Run client build
+        working-directory: ./client
+        run: |
+          npm run build
+
+      - name: Deploy to Vercel
+        id: vercel_deploy
+        uses: amondnet/vercel-action@v20
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: "--prod"
+          working-directory: ./client
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "Vercel deploy action finished. Check the Vercel dashboard or the action logs for the deployment URL."
